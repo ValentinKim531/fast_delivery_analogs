@@ -26,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.post("/best_options")
+@app.post("/best_analog")
 async def main_process(request: Request):
     # Receive the front end data (city hash, sku's, user address)
     request_data = await request.json()
@@ -52,22 +52,18 @@ async def main_process(request: Request):
     pharmacies = await find_medicines_in_pharmacies(encoded_city, payload)
 
     #Save only pharmacies with all sku's in stock
-    filtered_pharmacies = await filter_pharmacies(pharmacies)
+    #filtered_pharmacies = await filter_pharmacies(pharmacies)
 
     #Save pharmacies with analogs
     analog_pharmacies = await filter_with_analogs(pharmacies)
+    top_pharmacies = await sort_pharmacies_by_fulfillment(analog_pharmacies)
+    closest_pharmacies = await get_top_closest_pharmacies(top_pharmacies, user_lat, user_lon)
+    #cheapest_pharmacies = await get_top_cheapest_pharmacies(top_pharmacies)
+    result = await get_delivery_options(closest_pharmacies)
+    
 
-    #Get several pharmacies with cheapest sku's
-    cheapest_pharmacies = await get_top_cheapest_pharmacies(filtered_pharmacies)
-    #Get 2 closest Pharmacies
-    closest_pharmacies = await get_top_closest_pharmacies(filtered_pharmacies, user_lat, user_lon)
-    closest_analog = await get_top_closest_pharmacies(analog_pharmacies,user_lat,user_lon)
-    logger.info("Pharamcies with analogs: %s ", closest_analog)
-    #Compare Check delivery price for 2 closest pharmacies and 3 cheapest pharmacies
-    delivery_options1 = await get_delivery_options(closest_pharmacies, user_lat, user_lon, sku_data)
-    delivery_options2 = await get_delivery_options(cheapest_pharmacies, user_lat, user_lon, sku_data)
-    result = await best_option(delivery_options1, delivery_options2)
-    return {"pharmacies": result}
+    #result = await best_option(delivery_options1, delivery_options2)
+    return result
 
 
 
@@ -79,97 +75,115 @@ async def find_medicines_in_pharmacies(encoded_city, payload):
         return response.json()  # Return the JSON response
 
 
-
-#Save only pharmacies with all sku's in stock
-async def filter_pharmacies(pharmacies):
-    filtered_pharmacies = []
-
-    for pharmacy in pharmacies.get("result", []):
-        products = pharmacy.get("products", [])
-        
-        # Check if all products meet their desired quantities
-        all_available = all(
-            product["quantity"] >= product["quantity_desired"]
-            for product in products if product["quantity_desired"] > 0
-        )
-
-        if all_available:
-            filtered_pharmacies.append(pharmacy)
-
-    return {"filtered_pharmacies": filtered_pharmacies}
-
-
-# Save only pharmacies with all SKU's in stock or with the cheapest analog as a replacement
 async def filter_with_analogs(pharmacies):
-    filtered_pharmacies = []
     pharmacies_with_replacements = []
 
     for pharmacy in pharmacies.get("result", []):
         products = pharmacy.get("products", [])
-        replacements = []
+        updated_products = []  # This will hold products in stock and the cheapest analog
         total_sum = 0  # Initialize total sum for the pharmacy
-
-        all_available = True
+        replacements_needed = 0  # Track how many replacements were made
+        replaced_skus = []  # To store original and replacement SKU pairs
 
         # Check all products in the pharmacy
         for product in products:
             if product["quantity"] >= product["quantity_desired"]:
-                # Product has sufficient stock, add its base price to the total sum
-                total_sum += product["base_price"] * product["quantity_desired"]
+                # Product has sufficient stock, add its base price * quantity_desired to the total sum
+                product_total_price = product["base_price"] * product["quantity_desired"]
+                total_sum += product_total_price
+                updated_products.append(product)  # Keep the product as is
             elif "analogs" in product and product["analogs"]:
                 # Find the cheapest analog if the product is out of stock
                 cheapest_analog = min(product["analogs"], key=lambda analog: analog["base_price"])
-                replacements.append({
-                    "original": product,
-                    "replacement": cheapest_analog
+                # Create a new product entry for the analog (replacing the missing product)
+                replacement_product = {
+                    "source_code": cheapest_analog["source_code"],
+                    "sku": cheapest_analog["sku"],
+                    "name": cheapest_analog["name"],
+                    "base_price": cheapest_analog["base_price"],
+                    "price_with_warehouse_discount": cheapest_analog["price_with_warehouse_discount"],
+                    "warehouse_discount": cheapest_analog["warehouse_discount"],
+                    "quantity": cheapest_analog["quantity"],
+                    "quantity_desired": product["quantity_desired"],
+                    "pp_packing": cheapest_analog.get("pp_packing", ""),
+                    "manufacturer_id": cheapest_analog.get("manufacturer_id", ""),
+                    "recipe_needed": cheapest_analog.get("recipe_needed", False),
+                    "strong_recipe": cheapest_analog.get("strong_recipe", False),
+                }
+                # Add the price of the cheapest analog * quantity_desired to the total sum
+                analog_total_price = cheapest_analog["base_price"] * product["quantity_desired"]
+                total_sum += analog_total_price
+                updated_products.append(replacement_product)  # Add the analog as the product
+                replacements_needed += 1
+
+                # Track the replacement (original SKU and replacement SKU)
+                replaced_skus.append({
+                    "original_sku": product["sku"],
+                    "replacement_sku": cheapest_analog["sku"]
                 })
-                # Add the price of the cheapest analog to the total sum
-                total_sum += cheapest_analog["base_price"] * product["quantity_desired"]
             else:
-                # No stock and no analogs available, mark pharmacy as unavailable
-                all_available = False
+                # No stock and no analogs available, skip this pharmacy
                 break
-
-        if all_available:
-            if replacements:
-                # Store pharmacies that needed replacements, include total sum
+        else:
+            # If we finish the loop without breaking, we save the pharmacy
+            # Save only pharmacies where at least one replacement was made
+            if replacements_needed > 0:
                 pharmacies_with_replacements.append({
-                    "pharmacy": pharmacy,
-                    "replacements": replacements,
-                    "replacements_needed": len(replacements),
-                    "total_sum": total_sum  # Include total price of the pharmacy
-                })
-            else:
-                # Store pharmacies with all products in stock and total sum
-                filtered_pharmacies.append({
-                    "pharmacy": pharmacy,
-                    "total_sum": total_sum  # Include total price of the pharmacy
+                    "pharmacy": {
+                        "source": pharmacy["source"],  # Only include the pharmacy source info here
+                        "products": updated_products,  # Keep the updated products with analogs
+                        "total_sum": total_sum,  # Include total price of the pharmacy
+                        "replacements_needed": replacements_needed,  # Track the number of replacements
+                        "replaced_skus": replaced_skus  # Store the SKUs of original and replacements
+                    }
                 })
 
-    # Return both lists: pharmacies with full stock and those with replacements
-    return {
-        "filtered_pharmacies": pharmacies_with_replacements}
+    # Return pharmacies with replacements and their updated product lists
+    return {"filtered_pharmacies": pharmacies_with_replacements}
+
+
+
+async def sort_pharmacies_by_fulfillment(pharmacies_with_replacements):
+    # Sort pharmacies by the number of replacements (ascending)
+    sorted_pharmacies = sorted(
+        pharmacies_with_replacements.get("filtered_pharmacies", []),
+        key=lambda x: x["pharmacy"]["replacements_needed"]
+    )
+
+    fewest_analogs = sorted_pharmacies[:7]
+    return {"list_pharmacies": fewest_analogs}
 
 
 
 #Find pharmacies with cheapest "total_sum" fro sku's
 async def get_top_cheapest_pharmacies(pharmacies):
-    # Sort pharmacies by 'total_sum' in ascending order
-    sorted_pharmacies = sorted(pharmacies.get("filtered_pharmacies", []), key=lambda x: x["total_sum"])
+    # Access the list of pharmacies from the "list_pharmacies" key
+    pharmacies_list = pharmacies.get("list_pharmacies", [])
 
-    # Get the top 3 pharmacies with the lowest 'total_sum'
-    cheapest_pharmacies = sorted_pharmacies[:3]
+    # Sort pharmacies by 'total_sum' in ascending order
+    sorted_pharmacies = sorted(pharmacies_list, key=lambda x: x["pharmacy"]["total_sum"])
+
+    # Get the top 1 pharmacy with the lowest 'total_sum'
+    cheapest_pharmacies = sorted_pharmacies  # Adjust slice if you want more than one
 
     return {"list_pharmacies": cheapest_pharmacies}
+
 
 async def get_top_closest_pharmacies(pharmacies, user_lat, user_lon):
     # Create a list of pharmacies with their distance from the user
     pharmacies_with_distance = []
     
-    for pharmacy in pharmacies.get("filtered_pharmacies", []):
-        pharmacy_lat = pharmacy["source"]["lat"]
-        pharmacy_lon = pharmacy["source"]["lon"]
+    for item in pharmacies.get("list_pharmacies", []):
+        # Access the 'pharmacy' and 'source' dictionaries safely
+        pharmacy = item.get("pharmacy", {})
+        source = pharmacy.get("source", {})
+        pharmacy_lat = source.get("lat")
+        pharmacy_lon = source.get("lon")
         
+        # Check if lat/lon exist before calculating the distance
+        if pharmacy_lat is None or pharmacy_lon is None:
+            continue  # Skip if lat/lon is missing
+
         # Calculate Euclidean distance
         distance = haversine_distance(user_lat, user_lon, pharmacy_lat, pharmacy_lon)
         
@@ -185,25 +199,36 @@ async def get_top_closest_pharmacies(pharmacies, user_lat, user_lon):
     return {"list_pharmacies": closest_pharmacies}
 
 
+
+
+
 #Algorithm to determine distance in 2 dimensions
 def haversine_distance(lat1, lon1, lat2, lon2):
     distance = math.sqrt((lat2 - lat1) ** 2 + (lon2 - lon1) ** 2)
     return distance
 
 
-async def get_delivery_options(pharmacies, user_lat, user_lon, sku_data):
+
+async def get_delivery_options(pharmacies):
     cheapest_option = None
     fastest_option = None
 
     for pharmacy in pharmacies["list_pharmacies"]:
-        # Build the POST request payload
+        source = pharmacy.get("source", {})
+        products = pharmacy.get("products", [])
+
+        # Ensure source code is present
+        if "code" not in source:
+            continue  # Skip if no source code is available
+
+        # Build the POST request payload using the products from the pharmacy
         payload = {
-            "items": sku_data,  # Pass the SKU data
+            "items": [{"sku": product["sku"], "quantity": product["quantity_desired"]} for product in products],
             "dst": {
-                "lat": user_lat,
-                "lng": user_lon
+                "lat": source.get("lat"),  # Latitude of the pharmacy
+                "lng": source.get("lon")   # Longitude of the pharmacy
             },
-            "source_code": pharmacy["source"]["code"]
+            "source_code": source["code"]  # Use the pharmacy source code
         }
 
         # Send the POST request to the external endpoint
@@ -236,48 +261,11 @@ async def get_delivery_options(pharmacies, user_lat, user_lon, sku_data):
                     }
 
     return {
-        "cheapest_delivery_option": cheapest_option,
-        "fastest_delivery_option": fastest_option
+        "cheapest_analog_pharmacy": cheapest_option,
+        "fastest_analog_pharmacy": fastest_option
     }
 
 
 
-async def best_option(var1, var2):
-    # Initialize cheapest and fastest options
-    best_cheapest_option = None
-    best_fastest_option = None
 
-    # Get the cheapest and fastest options from var1 and var2
-    cheapest_option_1 = var1.get("cheapest_delivery_option")
-    fastest_option_1 = var1.get("fastest_delivery_option")
-    cheapest_option_2 = var2.get("cheapest_delivery_option")
-    fastest_option_2 = var2.get("fastest_delivery_option")
-
-    # Compare the cheapest options
-    if cheapest_option_1 and cheapest_option_2:
-        if cheapest_option_1["total_price"] <= cheapest_option_2["total_price"]:
-            best_cheapest_option = cheapest_option_1
-        else:
-            best_cheapest_option = cheapest_option_2
-    elif cheapest_option_1:
-        best_cheapest_option = cheapest_option_1
-    elif cheapest_option_2:
-        best_cheapest_option = cheapest_option_2
-
-    # Compare the fastest options
-    if fastest_option_1 and fastest_option_2:
-        if fastest_option_1["delivery_option"]["eta"] <= fastest_option_2["delivery_option"]["eta"]:
-            best_fastest_option = fastest_option_1
-        else:
-            best_fastest_option = fastest_option_2
-    elif fastest_option_1:
-        best_fastest_option = fastest_option_1
-    elif fastest_option_2:
-        best_fastest_option = fastest_option_2
-
-    # Return the best options
-    return {
-        "best_cheapest_option": best_cheapest_option,
-        "best_fastest_option": best_fastest_option
-    }
 
