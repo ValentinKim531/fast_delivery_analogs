@@ -221,6 +221,9 @@ async def get_delivery_options(pharmacies):
         if "code" not in source:
             continue  # Skip if no source code is available
 
+        # Use the pharmacy's total_sum instead of items_price from the delivery API
+        pharmacy_total_sum = pharmacy.get("total_sum", 0)
+
         # Build the POST request payload using the products from the pharmacy
         payload = {
             "items": [{"sku": product["sku"], "quantity": product["quantity_desired"]} for product in products],
@@ -239,12 +242,13 @@ async def get_delivery_options(pharmacies):
 
         # Extract pricing and delivery options from the response
         if delivery_data.get("status") == "success":
-            items_price = delivery_data["result"]["items_price"]
             delivery_options = delivery_data["result"]["delivery"]
 
             # Compare for cheapest option
             for option in delivery_options:
-                total_price = items_price + option["price"]  # Item price + delivery price
+                delivery_price = option["price"]
+                total_price = pharmacy_total_sum + delivery_price  # Combine total_sum with delivery price
+                
                 if cheapest_option is None or total_price < cheapest_option["total_price"]:
                     cheapest_option = {
                         "pharmacy": pharmacy,
