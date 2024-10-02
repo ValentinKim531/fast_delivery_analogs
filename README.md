@@ -1,1 +1,1 @@
-Better Faster Harder Stronger Delievery
+Endpoint for determining pharmacies with analogs for certain medicines
