@@ -7,14 +7,18 @@ import httpx
 import logging
 import math
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)  
 logger = logging.getLogger(__name__)
 app = FastAPI()
 
-url_search = "https://prod-backoffice.daribar.com/api/v2/products/search"
-url_price = "https://prod-backoffice.daribar.com/api/v2/delivery/prices"
-params_city = {}
+URL_SEARCH = os.getenv("URL_SEARCH")
+URL_PRICE = os.getenv("URL_PRICE")
+
 # Define the payload
 payload = []
 
@@ -59,7 +63,7 @@ async def main_process(request: Request):
     top_pharmacies = await sort_pharmacies_by_fulfillment(analog_pharmacies)
     closest_pharmacies = await get_top_closest_pharmacies(top_pharmacies, user_lat, user_lon)
     #cheapest_pharmacies = await get_top_cheapest_pharmacies(top_pharmacies)
-    result = await get_delivery_options(closest_pharmacies)
+    result = await get_delivery_options(closest_pharmacies, user_lat, user_lon)
     
 
     #result = await best_option(delivery_options1, delivery_options2)
@@ -70,7 +74,7 @@ async def main_process(request: Request):
 
 async def find_medicines_in_pharmacies(encoded_city, payload):
     async with httpx.AsyncClient() as client:
-        response = await client.post(url_search, params=params_city, json=payload)
+        response = await client.post(URL_SEARCH, params=encoded_city, json=payload)
         response.raise_for_status()  # Raise an error for bad responses
         return response.json()  # Return the JSON response
 
@@ -199,17 +203,13 @@ async def get_top_closest_pharmacies(pharmacies, user_lat, user_lon):
     return {"list_pharmacies": closest_pharmacies}
 
 
-
-
-
 #Algorithm to determine distance in 2 dimensions
 def haversine_distance(lat1, lon1, lat2, lon2):
     distance = math.sqrt((lat2 - lat1) ** 2 + (lon2 - lon1) ** 2)
     return distance
 
 
-
-async def get_delivery_options(pharmacies):
+async def get_delivery_options(pharmacies, user_lat, user_lon):
     cheapest_option = None
     fastest_option = None
 
@@ -228,15 +228,15 @@ async def get_delivery_options(pharmacies):
         payload = {
             "items": [{"sku": product["sku"], "quantity": product["quantity_desired"]} for product in products],
             "dst": {
-                "lat": source.get("lat"),  # Latitude of the pharmacy
-                "lng": source.get("lon")   # Longitude of the pharmacy
+                "lat": user_lat,
+                "lng": user_lon
             },
             "source_code": source["code"]  # Use the pharmacy source code
         }
 
         # Send the POST request to the external endpoint
         async with httpx.AsyncClient() as client:
-            response = await client.post("https://prod-backoffice.daribar.com/api/v2/delivery/prices", json=payload)
+            response = await client.post(URL_PRICE, json=payload)
             response.raise_for_status()
             delivery_data = response.json()  # Parse the JSON response
 
