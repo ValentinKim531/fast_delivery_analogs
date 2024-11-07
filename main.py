@@ -169,7 +169,13 @@ async def filter_with_analogs(pharmacies):
                 # Add the price of the cheapest analog * quantity_desired to the total sum
                 analog_total_price = cheapest_analog["base_price"] * product["quantity_desired"]
                 total_sum += analog_total_price
-                updated_products.append(replacement_product)  # Add the analog as the product
+                # updated_products.append(replacement_product)  # Add the analog as the product
+
+                # Добавляем replacement_product как аналог в список "analogs" оригинального продукта
+                product["analogs"] = [replacement_product]
+                # Добавляем измененный product в updated_products
+                updated_products.append(product)
+
                 replacements_needed += 1
 
                 # Track the replacement (original SKU and replacement SKU)
