@@ -137,57 +137,65 @@ async def filter_with_analogs(pharmacies):
     for pharmacy in pharmacies.get("result", []):
         products = pharmacy.get("products", [])
         updated_products = []  # This will hold products in stock and the cheapest analog
-        total_sum = 0  # Initialize total sum for the pharmacy
         replacements_needed = 0  # Track how many replacements were made
         replaced_skus = []  # To store original and replacement SKU pairs
 
         # Check all products in the pharmacy
         for product in products:
             if product["quantity"] >= product["quantity_desired"]:
-                # Product has sufficient stock, add its base price * quantity_desired to the total sum
-                product_total_price = product["base_price"] * product["quantity_desired"]
-                total_sum += product_total_price
-                updated_products.append(product)  # Keep the product as is
-            elif "analogs" in product and product["analogs"]:
-                # Find the cheapest analog if the product is out of stock
-                cheapest_analog = min(product["analogs"], key=lambda analog: analog["base_price"])
-                # Create a new product entry for the analog (replacing the missing product)
-                replacement_product = {
-                    "source_code": cheapest_analog["source_code"],
-                    "sku": cheapest_analog["sku"],
-                    "name": cheapest_analog["name"],
-                    "base_price": cheapest_analog["base_price"],
-                    "price_with_warehouse_discount": cheapest_analog["price_with_warehouse_discount"],
-                    "warehouse_discount": cheapest_analog["warehouse_discount"],
-                    "quantity": cheapest_analog["quantity"],
-                    "quantity_desired": product["quantity_desired"],
-                    "pp_packing": cheapest_analog.get("pp_packing", ""),
-                    "manufacturer_id": cheapest_analog.get("manufacturer_id", ""),
-                    "recipe_needed": cheapest_analog.get("recipe_needed", False),
-                    "strong_recipe": cheapest_analog.get("strong_recipe", False),
-                }
-                # Add the price of the cheapest analog * quantity_desired to the total sum
-                analog_total_price = cheapest_analog["base_price"] * product["quantity_desired"]
-                total_sum += analog_total_price
-                # updated_products.append(replacement_product)  # Add the analog as the product
-
-                # Добавляем replacement_product как аналог в список "analogs" оригинального продукта
-                product["analogs"] = [replacement_product]
-                # Добавляем измененный product в updated_products
+                # Product has sufficient stock, add it as is
                 updated_products.append(product)
+            elif "analogs" in product and product["analogs"]:
+                # Фильтруем аналоги, у которых количество больше или равно желаемому
+                available_analogs = [analog for analog in product["analogs"] if
+                                     analog["quantity"] >= product["quantity_desired"]]
 
-                replacements_needed += 1
+                # Проверяем, что у нас есть аналоги с достаточным количеством
+                if available_analogs:
+                    # Находим самый дешевый среди доступных аналогов
+                    cheapest_analog = min(available_analogs, key=lambda analog: analog["base_price"])
 
-                # Track the replacement (original SKU and replacement SKU)
-                replaced_skus.append({
-                    "original_sku": product["sku"],
-                    "replacement_sku": cheapest_analog["sku"]
-                })
+                    # Создаем запись для замены продукта аналогом
+                    replacement_product = {
+                        "source_code": cheapest_analog["source_code"],
+                        "sku": cheapest_analog["sku"],
+                        "name": cheapest_analog["name"],
+                        "base_price": cheapest_analog["base_price"],
+                        "price_with_warehouse_discount": cheapest_analog["price_with_warehouse_discount"],
+                        "warehouse_discount": cheapest_analog["warehouse_discount"],
+                        "quantity": cheapest_analog["quantity"],
+                        "quantity_desired": product["quantity_desired"],
+                        "pp_packing": cheapest_analog.get("pp_packing", ""),
+                        "manufacturer_id": cheapest_analog.get("manufacturer_id", ""),
+                        "recipe_needed": cheapest_analog.get("recipe_needed", False),
+                        "strong_recipe": cheapest_analog.get("strong_recipe", False),
+                    }
+
+                    # Добавляем replacement_product как аналог в список "analogs" оригинального продукта
+                    product["analogs"] = [replacement_product]
+                    updated_products.append(product)
+
+                    # Увеличиваем replacements_needed только если аналог был найден с достаточным количеством
+                    replacements_needed += 1
+                    replaced_skus.append({
+                        "original_sku": product["sku"],
+                        "replacement_sku": cheapest_analog["sku"]
+                    })
             else:
                 # No stock and no analogs available, skip this pharmacy
                 break
         else:
-            # If we finish the loop without breaking, we save the pharmacy
+            # Подсчет total_sum после добавления всех продуктов и аналогов
+            total_sum = sum(
+                # Если у продукта есть аналог с достаточным количеством, используем его для подсчета суммы
+                (product["analogs"][0]["base_price"] * product["analogs"][0]["quantity_desired"]
+                 if product.get("analogs") and product["analogs"][0]["quantity"] >= product["quantity_desired"]
+                 # Иначе считаем только основной продукт, если его количество соответствует желаемому
+                 else product["base_price"] * product["quantity_desired"] if product["quantity"] >= product[
+                    "quantity_desired"] else 0)
+                for product in updated_products
+            )
+
             # Save only pharmacies where at least one replacement was made
             if replacements_needed > 0:
                 pharmacies_with_replacements.append({
